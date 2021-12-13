@@ -1,0 +1,500 @@
+---
+title: "Modelagem Econométrica de Séries Temporais Estacionárias"
+author: "Heitor Gabriel Silva Monteiro"
+date: "`r Sys.Date()`"
+always_allow_html: true
+fontfamily: serif
+fontsize: 13pt
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+    toc: yes
+  html_document:
+    highlight: tango
+    theme:
+      bootswatch: journal
+    number_sections: no
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+---
+
+# Objetivo e Ferramentas
+
+Faz parte de todo grande projeto saber qual o melhor momento de lançar-se no mercado, publicar um lançamento ou entrar em competição. Para tal, é preciso saber se a economia da região em questão está aquecida de forma a aproveitar ao máximo a onda do crescimento local e conseguir se beneficiar e se preparar também para as sazonalidades adversas, próprias do ambiente.
+
+Para cumprir esse objetivo, e como forma de praticar a teoria econométrica, farei a análise e modelagem do Índice de Volume de Vendas no Comércio Varejista, da Pesquisa Mensal de Comércio, [PMC-IBGE](https://sidra.ibge.gov.br/pesquisa/pmc/tabelas), para o Brasil e Ceará, com a base do índice sendo 2014 (2014=100). Seguirei de perto a metodologia proposta por *Silveira Bueno* , em seu livro *Econometria De Séries Temporais*; o livro do *Enders*: *Applied Econometric Time Series*; e o livro de *Hyndman* & *Athanasopoulos*: [*Forecasting: Principles and Practice*](https://otexts.com/fpp3/). Sobre os procedimentos usados, é importante ter em mente que a modelagem econométrica não é um algoritmo linear, como uma receita de bolo; está mais para um movimento helicoidal ascendente, onde você volta nas mesmas ferramentas em diferentes estágios de maturação do modelo. No geral, começamos a modelagem abertos para todas as possibilidades: processos autoregressivos, ou médias móveis, ou ambos; tendências; sazonalidades; mudança estrutural e instabilidade paramétrica. Enquanto avançamos nos testes de significância e diagnósticos de resíduos, cortamos e refinamos essas possibilidades até encontrar um modelo **parcimonioso** e que gera **ruídos brancos**. Acerca da rotina de modelagem e do perigo de cair no overfitting, recomendo fortemente o estudo da seção 8 do capítulo 2 do Enders.
+
+Usarei os pacotes [Tidyverse](https://www.tidyverse.org/) e, para séries temporais, [Tidyverts](https://tidyverts.org/) que são a espinha dorsal da gramática de manipulação de dados no R, com vários outros pacotes agregáveis, vale a pena conhecê-los profundamente, juntamente com  [Stats](https://www.rdocumentation.org/packages/stats/versions/3.6.2) e [Forecast](https://www.rdocumentation.org/packages/forecast/versions/8.15).
+
+```{r, warning=FALSE, message=FALSE}
+setwd('/home/heitor/Área de Trabalho/R Projects/Econometria Aplicada ao R/Séries de Tempo/Séries Temporais Estacionárias')
+library(stats)
+library(tseries)
+library(forecast)
+library(tidyverse)
+library(plotly)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(ggpubr)
+# tidyverts core
+library(tsibble)
+library(fable)
+library(feasts)
+# tidyverts improvements tools
+library(tsibbletalk)
+library(fable.prophet)
+library(fabletools)
+```
+
+
+# Dados Brutos
+
+Os [dados](https://github.com/HeitorGabriel/time-series-modelling/blob/main/pmc.csv) são da [Tabela 3416](https://sidra.ibge.gov.br/tabela/3416), precisam ser importados e confirmados como data de frequência mensal.
+*Caso tenha alguma dúvida em alguma função usada, digite `help(nome_da_função)` no console R para conhecê-la melhor. Use também as referências no site do pacote.*
+
+```{r, warning=FALSE, message=FALSE}
+# importando
+pmc    <- read_csv('pmc.csv')
+
+# nova variável
+pmc$dt <- seq(from = lubridate::ym('2000 Jan'),
+			  to   = lubridate::ym('2021 Aug'), # alternativa: length=
+			  by   = "month")
+
+# forçar a nova variável a ser mensal
+pmc <- pmc |>
+	dplyr::mutate(dt = tsibble::yearmonth(as.character(dt))) |>
+	as_tsibble(index = dt)
+
+pmc$Data <- NULL   # apagar a data antiga
+pmc <- pmc |>     # defini-la como dados tsibble
+	as_tsibble()
+
+# confirma-se que a periodicidade é mensal, pela forçada q demos
+pmc |> interval()
+```
+
+Vou criar uma função `set_tab(dados_tab, cap_tab)` que simplificará a tabulação dos nossos dados. Os argumentos da função são os dados a serem tabelados e o título da tabela :
+
+```{r}
+set_tab <- function(dados_tab, cap_tab){
+	kable( x = dados_tab,
+		booktabs = TRUE,
+          escape   = FALSE,
+          digits   = 4,
+          caption  = cap_tab) |> 
+  kable_styling(latex_options =
+  			  	c("striped", "hold_position"),
+                position      = "center",
+                full_width    = F,
+  			    bootstrap_options =
+  			  	   c("striped", "hover", "condensed", "responsive"))
+} 
+```
+
+
+Visão geral das variáveis do dado:
+
+```{r, warning=FALSE, message=FALSE}
+# estrutura dos dados
+pmc |> glimpse()
+```
+
+Selecionamos Brasil e Ceará:
+
+```{r, warning=FALSE, message=FALSE}
+ce_br <- pmc |> 
+	select('dt', 'Ceará', 'Brasil') |> 
+	rename(ce = Ceará,
+		   br = Brasil)
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4, fig.cap='Índice de Volume de Vendas no Comércio Varejista. Ceará e Brasil. Jan2000-Ago2021'}
+ggplotly(ce_br |> 
+		 	ggplot() +
+		 	geom_line(aes(x=dt, y=ce),
+		 			  color='seagreen4') +
+		 	geom_line(aes(x=dt, y=br),
+		 			  color='deepskyblue3') +
+		 	ylab('Índice de Volume de Vendas') +
+		 	xlab('Tempo'))
+```
+
+Vemos que a série cearense parece ter uma maior volatilidade que a brasileira. Para enxergar o que acontece dentro de cada frequência (ano e mês), vamos fazer o plot agrupando essas frequências para o Ceará:
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4}
+
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ce_br |> gg_season(ce) |> plotly_build()
+ce_br |> gg_subseries(ce) |> plotly_build()
+
+```
+
+A primeira impressão das visualizações acima é que temos um período estacionário até o fim de 2004, quando começa uma tendência positiva até o fim de 2013, quando passa a cair levemente. Claramente, há sazonalidade dentro do ano em todos os períodos. Confirmaremos nossa intuição visual de estacionariedade (<2005), tendência (2005~2013), significância da queda (>2013) e sazonalidade com os testes de raíz unitária, FAC e FACP.
+
+Somente para fins didáticos, vamos fazer uma decomposição clássica aditiva da série, repartindo $série = tend + sazon + aleat$, que nos ajuda a entender melhor a série. A tendência ($\hat{T_t}$) é feita com a média móvel simples de seis meses. A sazonalidade é construída subtraindo a série original da tendência ($\ddot{y_t} = y_t - \hat{T_t}$ ), agrupando cada mês e subtraindo da sua média ($\hat{S}_t = \ddot{y}_{mês} - \ddot{\overline{y}}_{mês}$). O resíduo são as sobras desse processo ($\hat{R}_t = y_t - \hat{T}_t - \hat{S}_t$). Como vemos no gráfico abaixo, esse processo não torna o resíduo um Ruído Branco, além desse tipo de tendência não ser indicado em Passeios Aleatórios nem para previsões.
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=6, fig.cap='Decomposição Adivita por Média Móvel do Índice Volume de Vendas Cearense'}
+ce_br |> 
+	dplyr::select(ce, dt) |>
+	model(classical_decomposition(ce,type = "additive")) |>
+	components() |>
+	autoplot()
+```
+
+Como podemos ver pelo gráfico da tendência, ela pode ser repartida nas três fases comentadas. Não existe, para a série inteira, somente um componente gerador de tendência.
+
+# Raíz Unitária com KPSS e PP {.tabset .tabset-fade .tabset-pills}
+
+Os testes Kwiatkowski-Phillips-Schmidt-Shin (KPSS) e Phillips-Perron (PP) são usados para confirmar nossa intuição visual de tendência nos determinados períodos. Resumidamente, as raízes do polinômio real de operadores de defasagem devem estar dentro do ciclo unitário para que o processo $AR(.)$ seja estacionário e para que o processo $MA(.)$ seja invertível. Caso seja detectado raíz fora do ciclo, teremos que remover a tendência, diferenciando a série. Usaremos o teste PP para raíz unitária por ser robusto, se comparado a Dickey-Fuller (DF) na presença de tendência temporal, intercepto e correlação serial nos erros e o teste KPSS para estacionariedade pelo baixo poder do DF na presença de médias móveis perto do círculo unitário.
+
+A hipótese nula do KPSS é do processo ser estacionário ao entorno de uma tendência determinística, simplificamos com $H_0: y_t \tilde{} I(0)$ enquanto que a do PP é de raíz unitária. Então, para confirmarmos nossa intuição, o p-valor de um deve ser baixo e do outro deve ser alto.
+
+Como vemos abaixo, os testes para o primeiro e segundo períodos foram conclusivos para o Ceará e o Brasil: até 2004 é estacionária; 2005~2012 é integrável. Temos um problema na série cearence 2013~2021: os p-valores estão sinalizando características diferentes, podemos culpar o tamanho dos dados e uma posível heterocedasticidade. Veremos qual processo consegue melhor produzir ruídos brancos e i.i.d. O mesmo não ocorre para o Brasil, que mostra estacionariedade para o último período. 
+
+## 2000~2004 
+
+```{r}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ce <- ce_br |> 
+	dplyr::filter(dt <= tsibble::yearmonth('2004 Dec')) |>
+	features(ce, c(unitroot_kpss, unitroot_pp)) 
+# BR ~~~~~~~~~~~~~~~~~~~~~
+br <- ce_br |> 
+	dplyr::filter(dt <= tsibble::yearmonth('2004 Dec')) |>
+	features(br,c(unitroot_kpss, unitroot_pp)) 
+
+dplyr::bind_rows(list(Ce = ce, Br = br), .id = 'Região')  |>
+	set_tab(cap_tab = "Testes KPSS e PP entre 2000-2004.")
+```
+
+
+## 2005~2012
+
+```{r}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ce <- ce_br |> 
+	dplyr::filter(dt >= tsibble::yearmonth('2005 Jan') &
+				  dt <= tsibble::yearmonth('2012 Dec')) |>
+	features(ce, c(unitroot_kpss, unitroot_pp))
+# BR ~~~~~~~~~~~~~~~~~~~~~
+br <- ce_br |> 
+	dplyr::filter(dt >= tsibble::yearmonth('2005 Jan') &
+				  dt <= tsibble::yearmonth('2012 Dec')) |>
+	features(br, c(unitroot_kpss, unitroot_pp))
+
+dplyr::bind_rows(list(Ce = ce, Br = br), .id = 'Região')  |>
+	set_tab(cap_tab = "Testes KPSS e PP entre 2005-2012.")
+```
+
+## 2013~2021
+
+```{r}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ce <- ce_br |> 
+	dplyr::filter(dt >= tsibble::yearmonth('2013 Jan')) |>
+	features(ce, c(unitroot_kpss, unitroot_pp))
+# BR ~~~~~~~~~~~~~~~~~~~~~
+br <- ce_br |> 
+	dplyr::filter(dt >= tsibble::yearmonth('2013 Jan')) |>
+	features(br, c(unitroot_kpss, unitroot_pp))
+
+dplyr::bind_rows(list(Ce = ce, Br = br), .id = 'Região')  |>
+	set_tab(cap_tab = "Testes KPSS e PP entre 2013-2021.")
+```
+
+Precisamos diferenciar a série, remover sua tendência. Surge então dois desafios: 1) identificar qual processo gera a tendência, se determinística ou estocática; e 2) se aplicamos diferenciação sazonal e em qual lag. Pela característica das tendências, suspeito que seja uma estocástica, um *random walk*, que trata-se aplicando diferenciação. Onde e quantas diferenciações aplicar, além de quais ordens $AR()$ e $MA()$ fazer, respondemos pelas autocorrelações (FAC & FACP) e testes de autocorrelações (Ljung-Box).
+
+# Funções de Autocorrelações e Sazonalidades
+
+Relembrando que a FAC é usada para evidência de $MA(q)$ e suas sazonalidades; a FACP é usada para identificação de $AR(p)$ e suas sazonalidades. Existem dois tipos de sazonalidade: a aditiva e a multiplicativa. A primeira contém componentes $AR(.)$ e $MA(.)$ degenerados, o que causam significância estatística isoladas na FACP e FAC. Já a sazonalidade multiplicativa causa significância também nos períodos ao entorno do "coeficiente principal", como mostro no exemplo abaixo. *(Lembrando que $L$ é um operador de lag, não um escalar, de forma que $y_t·L^h = y_{t-h}$)*:
+
+$$ AR(1)(2)_6 \ \ \therefore$$
+$$ (1- \phi_1 L)(1- \phi_6 L^6 - \phi_{12} L^{12}) y_t = \epsilon_t \ \ \rightarrow $$
+$$ y_t = \phi_{1}y_{t-1} + \phi_{6}y_{t-6} - \phi_{1}\phi_{6}y_{t-7} +  \phi_{12}y_{t-12} - \phi_{1}\phi_{12}y_{t-13} + \epsilon_t $$
+
+
+$$ MA(2)(2)_{11} \ \ \therefore $$
+$$ y_t = (1- \theta_{1}L^{} - \theta_{2}L^{2})(1- \theta_{11}L^{11} - \theta_{22}L^{22})\epsilon_t  \ \ \rightarrow $$
+$$ y_t = \epsilon_t - \theta_{1}\epsilon_{t-1} - \theta_{2}\epsilon_{t-2} - \theta_{11}\epsilon_{t-11} + \theta_{1}\theta_{11}\epsilon_{t-12} + \theta_{2}\theta_{11}\epsilon_{t-13} - \theta_{22}\epsilon_{t-22} + \theta_{1}\theta_{22}\epsilon_{t-23} + \theta_{2}\theta_{22}\epsilon_{t-24} $$
+
+Nos exemplos acima, vemos que os modelos com sazonalidade multiplicativa são particularmente parcimoniosos por considerarem $y_{t-7}$, $y_{t-13}$, $\epsilon_{t-12}$, $\epsilon_{t-13}$, $\epsilon_{t-23}$ e $\epsilon_{t-24}$ sem a adição de novos coeficientes para isso, sem diminuir o grau de liberdade nas estatísticas dos coeficientes estimados para a série.
+
+Vamos fazer a primeira diferença das séries e analisar seus comportamentos.
+
+```{r, warning=FALSE, message=FALSE}
+## 1 Diferença ------------------------
+ce_br <- ce_br |>
+	dplyr::mutate(ce_dif1 = difference(ce, lag = 1),
+				  br_dif1 = difference(br, lag = 1)) |>
+	dplyr::filter(!is.na(ce_dif1))
+```
+
+Vemos que a variância em ambas as diferenciações parecem aumentar com o tempo, se essa diferença for estatisticamente significante, teremos problemas por não considerar a heterocedasticidade.
+
+```{r, warning=FALSE, message=FALSE, fig.height=4, fig.width=9, fig.align='center', fig.cap='Séries em Primeira Diferença'}
+gg_ce <- ce_br |> ggplot() + geom_line(aes(x=dt, y=ce_dif1), color='seagreen4')
+gg_br <- ce_br |> ggplot() + geom_line(aes(x=dt, y=br_dif1), color='deepskyblue3')
+
+ggarrange(gg_br, gg_ce, ncol=2)
+```
+
+Agora, faremos o plot da FAC e FACP para o Ceará e Brasil:
+
+```{r, warning=FALSE, message=FALSE, fig.height=4, fig.width=9, fig.align='center', fig.cap='FAC & FACP para a Série Cearense Diferenciada.'}
+gg1 <- ce_br |> feasts::ACF(ce_dif1, lag_max = 36) |> autoplot()
+gg2 <-ce_br |> feasts::PACF(ce_dif1, lag_max = 36) |> autoplot()
+
+ggarrange(gg1, gg2, ncol=2)
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.height=4, fig.width=9, fig.align='center', fig.cap='FAC & FACP para a Série Brasileira Diferenciada.'}
+gg1 <- ce_br |> feasts::ACF(br_dif1, lag_max = 36) |> autoplot()
+gg2 <- ce_br |> feasts::PACF(br_dif1, lag_max = 36) |> autoplot()
+
+ggarrange(gg1, gg2, ncol=2)
+```
+
+Perceba que, em ambas as séries, para a FAC, vemos picos nos múltiplos de 12 que demoram a cair e coeficientes significantes ao entorno desses "picos principais", o que reforça o uso das sazonalidades multiplicativas e **mais uma diferenciação no lag 12**.
+
+Os FACP's mostram significância até a primeira repetição do ciclo de 12 meses. É bem possível que esse $AR(p)(1)_{12}$ seja invertível e esteja causando esse $MA(q)(Q)_{12}$ com altíssima persistência em $sQ \  \forall \ s=12,24,36...$ como apontado na FAC. Vamos diferenciar sazonalmente novamente as séries, em 12: $\Delta^{12} y =  y_{t} - y_{t-12}$.
+
+```{r, message=FALSE, warning=FALSE}
+## 12 Diferença da 1 Diferença --------
+ce_br <- ce_br |>
+	dplyr::mutate( ce_dif112 = difference(ce_dif1, lag = 12),
+				   br_dif112 = difference(br_dif1, lag = 12)) |>
+	dplyr::filter(!is.na(ce_dif112))
+```
+
+Faremos os mesmos plots da 1 diferenciação, perceba que a heterocedasticidade permanece visível:
+
+```{r, warning=FALSE, message=FALSE, fig.height=4, fig.width=9, fig.align='center', fig.cap='Séries em Segunda Diferença Sazonal'}
+gg_ce <- ce_br |> ggplot() + geom_line(aes(x=dt, y=ce_dif112), color='seagreen4')
+gg_br <- ce_br |> ggplot() + geom_line(aes(x=dt, y=br_dif112), color='deepskyblue3')
+
+ggarrange(gg_br, gg_ce, ncol=2)
+```
+
+FAC e FACP para o Ceará e Brasil:
+
+```{r, warning=FALSE, message=FALSE, fig.height=4, fig.width=9, fig.align='center', fig.cap='FAC & FACP para a Série Cearense Diferenciada Sazonalmente.'}
+gg1 <- ce_br |> feasts::ACF(ce_dif112, lag_max = 36) |> autoplot()
+gg2 <-ce_br |> feasts::PACF(ce_dif112, lag_max = 36) |> autoplot()
+
+ggarrange(gg1, gg2, ncol=2)
+```
+
+Pelas novas FAC & FACP cearenses, podemos suspeitar de um $MA(q)(Q)$ com $q=1,3$ e $Q=1_{t=12}$ e um $AR(p)(P)$.
+
+```{r, warning=FALSE, message=FALSE, fig.height=4, fig.width=9, fig.align='center', fig.cap='FAC & FACP para a Série Brasileira Diferenciada Sazonalmente.'}
+gg1 <- ce_br |> feasts::ACF(br_dif112, lag_max = 36) |> autoplot()
+gg2 <- ce_br |> feasts::PACF(br_dif112, lag_max = 36) |> autoplot()
+
+ggarrange(gg1, gg2, ncol=2)
+```
+
+Pelas novas FAC & FACP brasileiras, podemos suspeitar de um $MA(q)(Q)$ com $q=1,3$ e $Q=1_{t=12}$ e um $AR(p)(P)$ com $p=1,2,4,5$ e $P=1_{t=12}$.
+
+Os decaimentos e "quase significância" de demais picos podem criar raízes polinomiais muito próximas do ciclo unitário nos modelos que estimarmos.
+
+# Os Modelos
+
+A seguir, faço um conjunto de modelos propostos para ambos os locais. Os últimos modelos, `ce_auto` e `br_auto`, são feitos automaticamente, com a interação combinatória de diferentes ordens, onde se escolhe o melhor modelo segundo o critério de BIC (Bayesian Information Criterion). Vamos fazer os modelos e escolher o mais parcimonioso, ou seja, com o menor BIC e diagnosticar os resíduos. Não esqueceremos de diferenciar em $(y_t - y_{t-1}) - y_{t-12}$.
+
+```{r, message=FALSE, warning=FALSE}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ce_models <- ce_br |>
+	model(ce_1 = ARIMA(ce ~ 0 + pdq(3,1,3) + PDQ(1,1,0,
+												 period = "1 year")),
+		  ce_11= ARIMA(ce ~ 1 + pdq(3,1,3) + PDQ(1,1,0,
+		  									   period = "1 year")),
+		  ce_2 = ARIMA(ce ~ 0 + pdq(3,1,3) + PDQ(0,1,1,
+		  									   period = "1 year")),
+		  ce_3 = ARIMA(ce ~ 0 + pdq(3,1,3) + PDQ(1,1,1,
+		  									   period = "1 year")),
+		  ce_4 = ARIMA(ce ~ 0 + pdq(3,1,0) + PDQ(1,1,0,
+		  									   period = "1 year")),
+		  ce_auto = ARIMA(ce,
+		  				stepwise = F,
+		  				approximation = F,
+		  				order_constraint =p+q+P+Q<= 8 &
+		  					(constant + d + D <= 3)))
+# BR ~~~~~~~~~~~~~~~~~~~~~
+br_models <- ce_br |>
+	model(br_1 = ARIMA(br ~ 0 + pdq(1,1,1) + PDQ(1,1,1,
+												 period = "1 year")),
+		  br_11= ARIMA(br ~ 1 + pdq(1,1,1) + PDQ(1,1,1,
+		  									   period = "1 year")),
+		  br_2 = ARIMA(br ~ 0 + pdq(1,1,4) + PDQ(1,1,1,
+		  									   period = "1 year")),
+		  br_3 = ARIMA(br ~ 0 + pdq(4,1,1) + PDQ(1,1,1,
+		  									   period = "1 year")),
+		  br_4 = ARIMA(br ~ 0 + pdq(4,1,4) + PDQ(1,1,1,
+		  									   period = "1 year")),
+		  br_auto = ARIMA(br,
+		  				stepwise = F,
+		  				approximation = F,
+		  				order_constraint =p+q+P+Q<= 8 &
+		  					(constant + d + D <= 3)))
+```
+
+Tabulando os modelos criados:
+
+```{r, message=FALSE, warning=FALSE}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ce_models |> pivot_longer(everything(),
+						  names_to = "Modelos",
+						  values_to = "Ordens")
+# BR ~~~~~~~~~~~~~~~~~~~~~
+br_models |> pivot_longer(everything(),
+						  names_to = "Modelos",
+						  values_to = "Ordens") 
+```
+
+Organizando pelos critérios de informação:
+
+```{r, message=FALSE, warning=FALSE}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+glance(ce_models) |> arrange(AICc) |> select(.model:BIC)
+# BR ~~~~~~~~~~~~~~~~~~~~~
+glance(br_models) |> arrange(AICc) |> select(.model:BIC)
+```
+
+Vamos ficar com os modelos com o menor BIC. Pegarei os dois melhores modelos de cada região, mas mostrarei apenas o diagnóstico dos resíduos do melhor modelo, no caso, os que foram gerados automaticamente.
+
+```{r, message=FALSE, warning=FALSE}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ce_models <- ce_br |>
+	model(ce_1 = ARIMA(ce ~ 0 + pdq(3,1,3) + PDQ(1,1,1,
+												 period = "1 year")),
+		  ce_auto = ARIMA(ce ~ 0 + pdq(2,1,2) + PDQ(1,1,1,
+		  										  period = "1 year")))
+# BR ~~~~~~~~~~~~~~~~~~~~~
+br_models <- ce_br |>
+	model(br_1 = ARIMA(br ~ 0 + pdq(4,1,4) + PDQ(1,1,1,
+												 period = "1 year")),
+		  br_auto = ARIMA(br ~ 0 + pdq(3,1,4) + PDQ(0,1,1,
+		  										  period = "1 year")))
+
+```
+
+# Diagnóstico dos Resíduos
+
+Vamos visualizar os resíduos:
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4, fig.cap='Série Real e Estimada para o Ceará'}
+## Fitted <> Real ---------------------
+# CE ~~~~~~~~~~~~~~~~~~~~~
+ggplotly(ce_models |> dplyr::select(ce_auto) |> fitted() |>
+		 	ggplot() +
+		 	geom_line(aes(x=dt, y=.fitted), alpha = .66, size= .8, linetype="twodash") +
+		 	geom_line(aes(x=dt, y=ce_br$ce), color = 'seagreen4', alpha = .75, size= .8))
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4}
+ce_models |> dplyr::select(ce_auto) |> fitted() |>
+		  	ggplot() +
+		  	geom_col(aes(x=dt, y=(.fitted - ce_br$ce)), color='seagreen4') +
+	labs(title = 'Erros entre Estimado e Valor Real da Série Cearense')
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4, fig.cap='Série Real e Estimada para o Brasil'}
+# BR ~~~~~~~~~~~~~~~~~~~~~
+ggplotly(br_models |> dplyr::select(br_auto) |> fitted() |>
+		 	ggplot() +
+		 	geom_line(aes(x=dt, y=.fitted), alpha = .66, size  = .8, linetype="twodash") +
+		 	geom_line(aes(x=dt, y=ce_br$br), color = 'deepskyblue3', alpha = .75, size  = .8))
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4}
+br_models |> dplyr::select(br_auto) |> fitted() |>
+		  	ggplot() +
+		  	geom_col(aes(x=dt, y=(.fitted - ce_br$br)), color='deepskyblue3') +
+	labs(title = 'Erros entre Estimado e Valor Real da Série Brasileira')
+
+```
+
+Agora procederemos com três testes para os resíduos: para constatar normalidade, usaremos o Teste de Jarque-Bera ($H_0: E(\epsilon^s_t)^3 =0$); para conferir se há autocorrelação: o Ljung-Box ($H_0: E(\epsilon_t \epsilon_{t+h}) = 0$); para a heterocedasticidade, que foi um problema que suspeitamos, o teste Arch-LM ($H_0:\phi_{j} = 0 \ \forall  j \ \ em \ \  (1-\phi_j L^j)var(\epsilon_i)=u_i $).
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+resid <- ce_models |> residuals() |> dplyr::filter(.model == "ce_auto") |> as_tsibble()
+
+jarque.bera.test(resid$.resid) # normalidade
+ljung_box(resid$.resid)        # autocorrelação
+stat_arch_lm(resid$.resid)     # heterocedasticidade
+
+ce_models |> dplyr::select(ce_auto) |> gg_arma()
+```
+
+Os testes para o modelo cearense mostraram resíduos com assimetria, sem autocorrelação entre os erros e heterocedasticidade, com a variância autocorrelacionada. **Vemos a necessidade de tratar a variância. O que faremos em trabalhos futuros.** Como suspeitamos, as raízes polinomiais estão muito perto do limite do ciclo unitário, o que indica alta persistência dos choques e valores passados.
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4}
+# BR ~~~~~~~~~~~~~~~~~~~~~
+resid <- br_models |> residuals() |> dplyr::filter(.model == "br_auto") |> as_tsibble()
+
+jarque.bera.test(resid$.resid) # normalidade
+ljung_box(resid$.resid)        # autocorrelação
+stat_arch_lm(resid$.resid)     # heterocedasticidade
+
+br_models |> dplyr::select(br_auto) |> gg_arma()
+```
+
+Para o modelo brasileiro, vemos também assimetria nos resíduos, baixíssimas chances de autocorrelação e também uma variância autocorrelacionada, apesar de um p-valor menor que o teste para o Ceará.
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4, fig.cap='Diagnóstico Geral dos Resíduos do Modelo Cearense'}
+ce_models |> dplyr::select(ce_auto) |> gg_tsresiduals()
+```
+
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4, fig.cap='Diagnóstico Geral dos Resíduos do Modelo Brasileiro'}
+ce_models |> dplyr::select(br_auto) |> gg_tsresiduals()
+```
+
+
+# Previsões
+
+```{r, message=FALSE, warning=FALSE}
+# CE ~~~~~~~~~~~~~~~~~~~~~
+prev_ce <- ce_models |> dplyr::select(ce_auto) |> fabletools::forecast(h=16)
+# BR ~~~~~~~~~~~~~~~~~~~~~
+prev_br <- br_models |> dplyr::select(br_auto) |> fabletools::forecast(h=16)
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4, fig.cap = 'Previsão Cearense até Dez 2022'}
+prev_ce |> autoplot(ce_br)
+```
+
+```{r, warning=FALSE, message=FALSE, fig.align='center', fig.width=9, fig.height=4, fig.cap = 'Previsão Brasileira até Dez 2022'}
+prev_br |> autoplot(ce_br)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
