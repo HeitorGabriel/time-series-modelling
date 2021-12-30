@@ -1,4 +1,4 @@
-# time-series-modelling
+# Time-Series-Modelling: Parte 1.
 
 Exercícios de Séries Temporais seguindo:
  - Econometria De Séries Temporais - da Silveira Bueno, R. de L.
